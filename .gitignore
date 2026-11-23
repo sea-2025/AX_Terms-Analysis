@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.env
+.env.*
+*.key
+*.pem
+result*.json
+audit*.json
+artifacts/

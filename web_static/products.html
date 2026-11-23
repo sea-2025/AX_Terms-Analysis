@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>예·적금 상품 문서 분석</title>
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/products.css">
+  <script src="/products.js" defer></script>
+</head>
+<body>
+  <header class="topbar"><div class="wrap brand"><span class="brand-mark" aria-hidden="true">◎</span><span>예·적금 문서 분석</span><a class="nav-link" href="/">개인정보 문서 분석</a><span class="local-badge">LOCAL DEMO</span></div></header>
+  <main class="wrap">
+    <div class="intro">
+      <p class="eyebrow">DEPOSIT DOCUMENT REVIEW</p>
+      <h1>예·적금의 조건을<br><span>원문과 함께 살펴보세요.</span></h1>
+      <p>한 상품의 약관·상품설명서·금리표에서 금리, 수수료와 중도해지 조건을 정리합니다.</p>
+    </div>
+    <div class="workspace" id="product-workspace">
+      <div class="input-column">
+        <button id="product-input-toggle" class="input-toggle" type="button" aria-expanded="true" aria-controls="product-input" hidden>입력 문서 접기</button>
+        <section class="panel input-panel" id="product-input" aria-labelledby="product-input-heading">
+          <div class="section-title"><div><p class="eyebrow">DOCUMENTS</p><h2 id="product-input-heading">상품 문서 입력</h2></div><span class="tag">같은 상품만</span></div>
+          <p class="section-copy">같은 상품의 공개 문서를 최대 6개까지 입력할 수 있습니다. 각 문서에 적힌 상품명을 확인해 입력해 주세요.</p>
+          <div class="notice"><span class="notice-icon" aria-hidden="true">!</span><p><strong>실제 개인정보는 입력하지 마세요.</strong><br>문서 내용은 분석을 위해 OpenAI API로 전송됩니다.</p></div>
+          <form id="product-form" novalidate>
+            <label class="label" for="product-name">분석할 상품명</label>
+            <input id="product-name" maxlength="100" placeholder="문서에 적힌 상품명" autocomplete="off">
+            <div id="documents"></div>
+            <button class="secondary-button" id="add-document" type="button">+ 같은 상품의 문서 추가</button>
+            <p class="scope-note">문서에 적힌 제목, 표, 각주를 포함한 본문 전체를 입력해 주세요. 원문은 자동으로 자르지 않습니다.</p>
+            <button id="product-submit" type="submit">상품 분석하기</button>
+            <p id="product-status" class="status" role="status" aria-live="polite"></p>
+            <p id="product-error" class="error" role="alert" hidden></p>
+          </form>
+        </section>
+      </div>
+      <section class="results" aria-labelledby="product-results-heading">
+        <div class="result-heading"><div><p class="eyebrow">ANALYSIS</p><h2 id="product-results-heading" tabindex="-1">상품 분석 결과</h2></div><span id="product-badge" class="tag">분석 전</span></div>
+        <p class="section-copy">입력 문서에 나온 사실과 조건을 근거와 함께 확인합니다.</p>
+        <p id="product-alert" class="result-alert" role="status" hidden></p>
+        <div id="product-note" class="result-note">입력 범위가 전문이어도 원본 전체를 검증한 것은 아닙니다. 금리와 조건은 반드시 원문과 대조해 주세요.</div>
+        <details id="product-documents" class="document-info" hidden><summary class="evidence-title">분석 문서 정보</summary><div id="product-document-list"></div></details>
+        <div id="product-cards" class="cards" aria-live="polite"></div>
+        <p class="disclaimer">AI가 문장과 숫자를 잘못 연결하거나 누락할 수 있습니다. 이 화면은 상품 추천이나 이자 계산을 제공하지 않습니다.</p>
+      </section>
+    </div>
+  </main>
+  <template id="document-template">
+    <fieldset class="document-entry">
+      <legend>문서 <span class="document-number"></span></legend>
+      <label class="label">문서명<input class="document-name" maxlength="100" placeholder="예: 상품설명서"></label>
+      <label class="label">문서의 상품명<input class="document-product" maxlength="100" placeholder="위 상품명과 동일하게 입력"></label>
+      <label class="label">입력 범위<select class="document-scope"><option value="unknown">모름</option><option value="full">전문</option><option value="excerpt">일부</option></select></label>
+      <label class="label">문서에 적힌 기준일·개정일 <span class="optional">(없으면 비워 둠)</span><input class="document-date" maxlength="100" placeholder="예: 2026년 1월 1일"></label>
+      <label class="label">공개 문서 본문<textarea class="document-text" maxlength="40000" placeholder="문서의 제목, 본문, 표와 각주를 붙여 넣어 주세요." spellcheck="false"></textarea></label>
+      <button class="remove-document" type="button">이 문서 삭제</button>
+    </fieldset>
+  </template>
+</body>
+</html>

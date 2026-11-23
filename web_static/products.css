@@ -1,0 +1,27 @@
+.nav-link { margin-left: auto; font-size: 14px; color: #176f62; text-decoration: none; font-weight: 700; }
+.nav-link:hover { text-decoration: underline; }
+.local-badge { margin-left: 4px; }
+input { width: 100%; color: #233d3b; background: #fff; border: 1px solid #cadbd7; border-radius: 9px; font: inherit; font-size: 15px; padding: 11px 12px; }
+input:focus { outline: 3px solid #a4ded3; outline-offset: 2px; border-color: #178d7c; }
+.document-entry { margin: 22px 0 16px; border: 1px solid #e1eae8; border-radius: 10px; padding: 16px; min-width: 0; }
+.document-entry legend { color: #176f62; padding: 0 7px; font-weight: 700; }
+.document-entry .label { margin-bottom: 15px; }
+.document-entry .label input, .document-entry .label select, .document-entry .label textarea { display: block; margin-top: 7px; font-weight: 400; }
+.document-entry textarea { min-height: 190px; }
+.optional { font-weight: 400; color: #71827f; }
+.secondary-button, .remove-document { background: #fff; color: #176f62; border: 1px solid #b9d5ce; }
+.secondary-button:hover, .remove-document:hover { background: #edf7f4; }
+.remove-document { width: auto; padding: 7px 12px; font-size: 14px; }
+.fact-list { display: grid; gap: 12px; margin-top: 16px; }
+.fact { border-top: 1px solid #eaf0ef; padding-top: 13px; }
+.fact-heading { display: flex; align-items: start; flex-wrap: wrap; gap: 8px; }
+.fact-heading .state { flex: 0 0 auto; }
+.fact-text { margin: 0; font-size: 16px; line-height: 1.75; color: #263f3c; white-space: pre-wrap; }
+.conditions, .unknowns { margin: 9px 0 0; padding-left: 22px; color: #405754; font-size: 15px; line-height: 1.8; white-space: pre-wrap; }
+.unknown-title { color: #856039; font-size: 14px; font-weight: 700; margin: 16px 0 0; }
+.document-label { color: #147a6b; font-size: 13px; font-weight: 700; }
+.document-info { padding: 0 2px 16px; }
+.document-info-entry { border-top: 1px solid #eaf0ef; margin-top: 12px; padding-top: 10px; }
+.document-info-entry p { margin: 0; }
+.document-info-text { color: #526763; font-size: 14px; line-height: 1.7; overflow-wrap: anywhere; }
+@media (max-width: 500px) { .local-badge { display: none; } .nav-link { font-size: 13px; } .document-entry { padding: 12px; } }
