@@ -90,7 +90,7 @@ async function main() {
   assert(await run("!document.querySelector('#error').hidden && !document.querySelector('#result-alert').hidden && document.querySelector('#result-alert').textContent.includes('분석 실패') && !document.querySelector('#cards').textContent.includes('onerror')"), "Failure was hidden or stale result remains");
 
   // Replay the saved real sample response locally; fetch never contacts the API.
-  const sample = fs.readFileSync(path.join(__dirname, "..", "sample.txt"), "utf8");
+  const sample = fs.readFileSync(path.join(__dirname, "..", "sample.txt"), "utf8").replace(/\r\n?/g, "\n");
   const resultPath = path.join(__dirname, "..", "artifacts", "result-rights.json");
   const sampleBlocks = sample.replace(/\r\n?/g, "\n").split(/\n(?:[ \t]*\n)+/).filter(block => block.trim());
   const saved = fs.existsSync(resultPath)

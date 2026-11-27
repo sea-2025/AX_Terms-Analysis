@@ -1,0 +1,12 @@
+.git
+.env*
+*.key
+*.pem
+artifacts/
+test_data/
+tests/
+docs/
+legacy/
+final_validation_report.md
+__pycache__/
+*.pyc

@@ -1,0 +1,10 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "python",
+  "functions": {
+    "app.py": {
+      "maxDuration": 150,
+      "excludeFiles": "{tests/**,test_data/**,docs/**,legacy/**,artifacts/**,.env*,final_validation_report.md}"
+    }
+  }
+}

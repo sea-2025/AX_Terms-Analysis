@@ -48,6 +48,14 @@ python .\web.py
 
 웹 서버는 요청 본문, 결과 및 API 키를 운영 로그에 기록하거나 결과 파일로 저장하지 않습니다. 키는 서버에서만 사용합니다.
 
+## Vercel 배포
+
+`app.py`는 기존 분석 함수를 재사용하는 Vercel용 WSGI 진입점입니다. GitHub 레포지토리를 Vercel의 개인용 Hobby 플랜에 연결한 뒤 프로젝트 환경변수로 `OPENAI_API_KEY`와 `OPENAI_MODEL`을 설정하세요. 키는 GitHub나 브라우저에 넣지 않습니다. Vercel 환경변수 변경은 새 배포부터 적용됩니다.
+
+배포 주소의 `/products`에서 상품 분석을 사용할 수 있습니다. 분석 요청에는 OpenAI API 비용이 발생하며, 공개 사이트에서는 다른 방문자의 분석도 설정한 계정에 청구됩니다. 브라우저의 중복 클릭 방지와 서버 인스턴스별 동시 실행 방지는 여러 서버 인스턴스 전체의 사용량 제한을 보장하지 않습니다.
+
+`tests/run_hosted_browser_mock.py`는 배포용 서버의 브라우저 화면을 모의 응답으로 확인합니다. 기존 로컬 서버와 CLI 사용법은 동일합니다.
+
 ## 기존 개인정보 문서 분석
 
 같은 서버의 **http://127.0.0.1:8000/** 에서 개인정보 문서 분석 화면을 사용할 수 있습니다. `sample.txt`는 이 기능을 위한 공개 개인정보 문서의 시험 입력이며 예·적금 상품설명서가 아닙니다. 원본은 [하나은행 공개 문서 PDF](https://image.kebhana.com/cont/customer/customer07/customer0701/customer070106/__icsFiles/afieldfile/2025/08/20/3-08-1294.pdf)입니다.
