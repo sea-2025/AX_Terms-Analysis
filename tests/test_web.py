@@ -102,6 +102,28 @@ class WebTests(unittest.TestCase):
         self.assertEqual(result["processing_status"], "complete")
         self.assertNotIn("secret", json.dumps(result))
 
+    def test_product_id_only_response_copies_each_source_paragraph_and_flags_missing_fields(self):
+        import product_analysis
+        source = "우대 대상은 급여이체 고객입니다.\n\n기간과 예외는 별도 조건을 확인합니다."
+        doc = {"name": "가상 약관", "product_name": "가상 예금", "scope": "full", "date": "", "text": source}
+        raw = {"product": {"suitability": "suitable", "consistency": "consistent", "note": ""},
+               "document_dates": [{"document_id": "D001", "date": "", "status": "not_found_in_input", "evidence": []}],
+               "categories": [{"category": c, "summary": "", "facts": [], "unknowns": []} for c in product_analysis.CATEGORIES]}
+        raw["categories"][0]["facts"] = [{"statement": "우대금리 조건", "important_conditions": [], "conditions": [],
+            "condition_fields": {"applicability": "급여이체", "period_definition": "", "exceptions": ""},
+            "status": "found", "evidence": [{"document_id": "D001", "block_id": "P0001"},
+                                              {"document_id": "D001", "block_id": "P0002"}]}]
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "secret", "OPENAI_MODEL": "gpt-4.1-mini"}), \
+             patch("product_analysis.call_model", return_value=raw) as call:
+            status, result = self.request({"product_name": "가상 예금", "documents": [doc]}, path="/api/products")
+        self.assertEqual(status, 200)
+        call.assert_called_once()
+        fact = result["categories"][0]["facts"][0]
+        self.assertEqual(fact["status"], "needs_review")
+        self.assertEqual(fact["condition_fields_missing"], ["period_definition", "exceptions"])
+        self.assertEqual([e["quote"] for e in fact["evidence"]], source.split("\n\n"))
+        self.assertNotIn("secret", json.dumps(result))
+
     def test_product_over_limit_and_mixed_product_do_not_call_model(self):
         doc = {"name": "가상 약관", "product_name": "가상 예금", "scope": "full", "date": "", "text": "가" * 10001}
         with patch.dict("os.environ", {"OPENAI_API_KEY": "secret", "OPENAI_MODEL": "gpt-4.1-mini"}), \

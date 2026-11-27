@@ -172,6 +172,25 @@ async function main() {
     assert(await run("document.querySelectorAll('#product-cards .card').length === 3"), "Product cards not shown");
     assert(await run("basicRateText({period:'12개월 이상 24개월 미만',rate:'연 2.80%',period_basis:'contract_term'}) === '1년 이상 2년 미만 가입하면 기본금리는 연 2.80%예요.' && basicRateText({period:'13개월 이상',rate:'연 1.50%'}).includes('기간 13개월 이상') && !basicRateText({period:'13개월 이상',rate:'연 1.50%'}).includes('가입하면')"),
       "Duration conversion or unverified contract-term fallback failed");
+    assert(await run("numberedReviewConditions({evidence:[{quote:'① 조건 하나\\n② 조건 둘'}]}).length === 2 && numberedReviewConditions({evidence:[{quote:'① 긴 조건\\n이어지는 예외'}]}).length === 0"),
+      "Multiline source condition was shortened or dropped");
+    assert(await run(`(() => {
+      const ev={document_name:'가상',document_id:'D001',block_id:'P0001',quote:'표'};
+      const fact={status:'found',statement:'표',important_conditions:['조건 A'],conditions:[],evidence:[ev],
+        structured_values:[{kind:'basic_rate',period:'6개월 이상',rate:'연 2%'}]};
+      const changed={...fact,important_conditions:['조건 B']};
+      render([{category:'금리와 우대조건',summary:'',facts:[fact,structuredClone(fact),changed],unknowns:[]}]);
+      const rows=[...document.querySelectorAll('#product-cards .fact')];
+      const ok=rows.length===2 && rows[0].textContent.includes('조건 A') && rows[1].textContent.includes('조건 B');
+      resetResults(); return ok;
+    })()`), "Basic-rate deduplication removed different conditions or kept an exact duplicate");
+    assert(await run(`(() => {const f={evidence:[{quote:'우대이율\\n적용조건 : 아래 조건이면 최대 연 0.5%p 우대\\n단, 동의를 만기까지 유지\\n① 첫째'}]};
+      return priorityReviewContext(f)[0].includes('최대 연 0.5%p') && priorityReviewContext(f)[0].includes('동의를 만기까지 유지');})()`),
+      "Priority source context lost its cap or condition");
+    assert(await run(`(() => {const f=renderFact({status:'needs_review',statement:'원문 발췌: 예시',important_conditions:[],conditions:[],
+      evidence:[{document_name:'가상',document_id:'D001',block_id:'P0001',quote:'① 긴 조건\\n이어지는 예외'}]}, {showReviewSource:true});
+      return !f.querySelector('.review-source') && !f.querySelector('details').open && f.querySelector('.quote-text').textContent === '① 긴 조건\\n이어지는 예외';})()`),
+      "Multiline condition was lost rather than kept in collapsed evidence");
     const fictional = fs.readFileSync(path.join(__dirname, "fixtures", "fictional-deposit.txt"), "utf8");
     await run(`window.__productFetchCount = 0;
       window.fetch = (url, opts) => {window.__productFetchCount++; window.__productRequest = JSON.parse(opts.body);
@@ -196,7 +215,9 @@ async function main() {
         {category:'금리와 우대조건',summary:'기간과 조건을 확인하세요.',
          facts:[{statement:'<img src=x onerror=window.__productInjected=1>',status:'found',
            important_conditions:['월 50만원 이상 3회, 6개월 유지','중도해지 시 제외'],conditions:['상세 확인 조건'],
-           evidence:[{document_name:'가상 상품설명서',document_id:'D001',block_id:'P0001',quote:'<svg onload=window.__productInjected=1>'}]}],
+           evidence:[{document_name:'가상 상품설명서',document_id:'D001',block_id:'P0001',quote:'<svg onload=window.__productInjected=1>'}]},
+          {statement:'원문 발췌: 테스트',status:'needs_review',important_conditions:[],conditions:[],
+           evidence:[{document_name:'가상 상품설명서',document_id:'D001',block_id:'P0002',quote:'① <img src=x onerror=window.__productInjected=1>'}]}],
          unknowns:['기준일 추가 확인']},
         {category:'수수료',summary:'금액은 미확인입니다.',
          facts:[{statement:'근거 검증에 실패해 이 사실을 표시하지 않습니다.',status:'validation_failed',important_conditions:[],conditions:[],evidence:[]}],
@@ -209,6 +230,7 @@ async function main() {
     assert(await run("document.querySelector('#product-input').hidden && document.querySelector('#product-workspace').classList.contains('result-focus')"), "Product input did not collapse");
     assert(await run("document.querySelectorAll('#product-cards .card').length === 3 && !document.querySelector('#product-alert').hidden"), "Product results or partial warning absent");
     assert(await run("!window.__productInjected && !document.querySelector('#product-cards img, #product-cards svg')"), "Product result executed HTML");
+    assert(await run("document.querySelector('.review-source')?.textContent.includes('① <img') && document.querySelector('.review-source').closest('.fact').querySelector('.state').textContent === '추가 확인 필요'"), "Review source was hidden, executed, or shown as confirmed");
     assert(await run("document.querySelector('.conditions').textContent.includes('50만원') && document.querySelector('.conditions').textContent.includes('중도해지 시 제외')"), "Product conditions not visible");
     assert(await run("document.querySelector('#product-cards details') && !document.querySelector('#product-cards details').open"), "Product evidence not collapsed");
     await run("document.querySelector('#product-cards details summary').click()");
@@ -223,6 +245,24 @@ async function main() {
       await run(`window.fetch = async () => ({ok:true, json:async () => (${JSON.stringify(replay)})});
         document.querySelector('#product-submit').click()`);
       await waitFor(() => run("!document.querySelector('#product-submit').disabled"));
+      assert(await run("[...document.querySelectorAll('#product-cards details')].every(d => !d.open) && [...document.querySelectorAll('#product-cards .quote')].every(q => q.closest('details:not([open])'))"),
+        "Original evidence or details were not initially collapsed");
+      assert(await run("[...document.querySelectorAll('#product-cards .state.found')].every(e => e.textContent === '원문 근거 확인')"),
+        "Evidence status implies a broader verification");
+      assert(await run("[...document.querySelectorAll('#product-cards .fact')].some(f => f.querySelector('.state')?.textContent === '추가 확인 필요' && f.querySelector('.review-source')?.textContent.includes('①') && f.querySelector('.review-source')?.textContent.includes('③') && f.querySelector('.review-source').getClientRects().length)"),
+        "Review-only priority conditions are missing or presented as confirmed");
+      assert(await run("[...document.querySelectorAll('#product-cards .card')][2].textContent.includes('추가 확인할 원문 보기 · 4개') && [...document.querySelectorAll('#product-cards .card')][2].querySelector('.state.failed').getClientRects().length"),
+        "Grouped review state or source access is missing");
+      assert(await run("['P0022','P0037','P0049','P0051'].every(id => [...document.querySelectorAll('#product-cards .card')][2].textContent.includes(id))"),
+        "Grouping dropped source references");
+      if (process.env.TERMS_CAPTURE_VISIBLE === "1") {
+        const visible = await run(`({badge: document.querySelector('#product-badge').innerText,
+          alert: document.querySelector('#product-alert').innerText,
+          note: document.querySelector('#product-note').innerText,
+          cards: [...document.querySelectorAll('#product-cards .card')].map(card => card.innerText),
+          disclaimer: document.querySelector('.results .disclaimer').innerText})`);
+        console.log("VISIBLE_RESULT " + JSON.stringify(visible));
+      }
       assert(await run("[...document.querySelectorAll('#product-cards .fact-text')].some(e => e.textContent.includes('6개월 이상 1년 미만 가입하면 기본금리는 연 2.60%예요.') && e.getClientRects().length)"),
         "Easy basic rate missing from the main view");
       assert(await run("[...document.querySelectorAll('#product-cards details')].some(d => d.querySelector('summary')?.textContent.includes('기간별 기본금리 전체 보기') && !d.open && d.textContent.includes('1년 이상 2년 미만 가입하면 기본금리는 연 2.80%예요.'))"),
@@ -239,12 +279,25 @@ async function main() {
       await run("[...document.querySelectorAll('#product-cards details > summary')].find(s => s.textContent.includes('기간별 중도해지 금리와 계산식 보기')).click()");
       assert(await run("[...document.querySelectorAll('#product-cards .rate-rows li')].some(li => li.textContent.includes('3개월 이상 6개월 미만') && li.textContent.includes('최저이율 연 0.15%') && li.getClientRects().length) && [...document.querySelectorAll('#product-cards .rate-rows li')].some(li => li.textContent.includes('3개월 미만: 연 0.1%') && !li.textContent.includes('0.15%'))"),
         "Early-rate details do not preserve the minimum's period");
+      if (process.env.TERMS_CAPTURE_VISIBLE === "1") {
+        const detailRows = await run(`(() => {
+          const details = [...document.querySelectorAll('#product-cards details')];
+          const basic = details.find(d => d.querySelector('summary')?.textContent.includes('기간별 기본금리 전체 보기'));
+          const early = details.find(d => d.querySelector('summary')?.textContent.includes('기간별 중도해지 금리와 계산식 보기'));
+          return {basic: [...basic.querySelectorAll('.rate-rows li')].map(li => li.innerText),
+                  early: [...early.querySelectorAll('.rate-rows li')].map(li => li.innerText)};
+        })()`);
+        console.log("VISIBLE_DETAILS " + JSON.stringify(detailRows));
+      }
       assert(await run("document.querySelectorAll('#product-cards .card')[1].textContent.includes('일반 가입·해지 수수료에 대한 정보를 자동으로 확인하지 못했어요.') && !document.querySelectorAll('#product-cards .card')[1].textContent.includes('0원')"),
         "Missing fee was misrepresented");
       assert(await run("document.querySelectorAll('#product-cards .card')[1].textContent.includes('위법계약 해지에는 정해진 조건에 따른 비용 제한이 있어요.') && document.querySelectorAll('#product-cards .card')[1].textContent.includes('정당한 사유 없이') && document.querySelectorAll('#product-cards .card')[1].textContent.includes('계약일부터 5년 이내')"),
         "Conditional fee restriction and its conditions were not displayed");
-      assert(await run("document.querySelector('#product-cards').textContent.includes('추가 확인 필요') && document.querySelector('#product-cards').textContent.includes('근거 검증 실패')"),
-        "Review or evidence failure status missing");
+      assert(await run("document.querySelector('#product-cards').textContent.includes('추가 확인 필요')"),
+        "Review status missing");
+      const expectedFailure = replay.categories.some(c => c.facts.some(f => f.status === 'validation_failed'));
+      assert((await run("document.querySelector('#product-cards').textContent.includes('근거 검증 실패')")) === expectedFailure,
+        "Evidence failure status does not match the replayed result");
       assert(await run("!document.querySelector('#product-cards').textContent.includes('중도해지 시점의 영업점')"),
         "Unverified conflicting condition was rendered");
       console.log("Saved response rendered with simple rates, source-backed conditions, and collapsed details.");

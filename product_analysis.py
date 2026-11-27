@@ -41,7 +41,13 @@ document_dates에는 각 입력 문서 ID마다 날짜를 원문 그대로 적�
 각 항목 summary는 조건을 빠뜨리지 않는 짧은 한국어로 쓴다.
 사실마다 statement, important_conditions, conditions, status, evidence를 제공한다.
 핵심 적용 기간·금액·횟수와 예외는 important_conditions에, 그 밖의 세부 조건은 conditions에 적는다.
-확인하지 못한 사항은 unknowns에 적고 모든 근거에 document_id, block_id, quote를 넣는다."""
+우대조건의 적용 대상, 기간 정의, 예외·제외를 condition_fields에 각각 적는다.
+원문에서 확인하지 못하거나 해당 여부를 판단할 수 없는 항목은 빈 문자열로 둔다.
+우대조건이 아닌 사실에도 확인되지 않은 condition_fields는 빈 문자열로 둔다.
+확인하지 못한 사항은 unknowns에 적는다.
+각 근거에는 document_id와 block_id만 넣고 원문 인용문을 작성하지 않는다.
+여러 문단이 필요하면 각각 별도의 근거로 지정한다.
+규칙의 원문 인용 요구는 서버가 지정된 문단에서 원문을 복사해 충족한다."""
 
 
 class RuleConfigurationError(Exception):
@@ -71,11 +77,14 @@ def obj(properties):
 
 
 STRING = {"type": "string"}
-EVIDENCE_SCHEMA = obj({"document_id": STRING, "block_id": STRING, "quote": STRING})
+EVIDENCE_SCHEMA = obj({"document_id": STRING, "block_id": STRING})
+CONDITION_FIELDS = ("applicability", "period_definition", "exceptions")
+CONDITION_LABELS = {"applicability": "적용 대상", "period_definition": "기간 정의", "exceptions": "예외·제외 조건"}
 FACT_SCHEMA = obj({
     "statement": STRING,
     "important_conditions": {"type": "array", "items": STRING},
     "conditions": {"type": "array", "items": STRING},
+    "condition_fields": obj({name: STRING for name in CONDITION_FIELDS}),
     "status": {"type": "string", "enum": ["found", "not_found_in_input", "needs_review"]},
     "evidence": {"type": "array", "items": EVIDENCE_SCHEMA},
 })
@@ -215,6 +224,30 @@ def exact_keys(value, keys):
     return isinstance(value, dict) and set(value) == set(keys)
 
 
+def evidence_descriptor(value):
+    """Accept old saved responses, but do not use a model-generated quote."""
+    if not isinstance(value, dict):
+        return False
+    if set(value) not in ({"document_id", "block_id"}, {"document_id", "block_id", "quote"}):
+        return False
+    return all(isinstance(v, str) for v in value.values())
+
+
+def check_priority_fields(fact, category, evidence):
+    """Check field presence and literal source support, without asserting entailment."""
+    if category == CATEGORIES[1]:
+        return [], []
+    terms = [fact["statement"], *fact["important_conditions"], *fact["conditions"]]
+    if not any("우대" in term for term in terms):
+        return [], []
+    values = fact.get("condition_fields", {})
+    unknown = {"", "미확인", "불명", "없음", "해당없음", "해당 없음", "n/a", "unknown", "not_applicable"}
+    missing = [name for name in CONDITION_FIELDS if values.get(name, "").strip().casefold() in unknown]
+    unverified = [name for name in CONDITION_FIELDS if name not in missing and
+                  not any(values[name].strip() in item["quote"] for item in evidence)]
+    return missing, unverified
+
+
 PERIOD_CELL = re.compile(r"^\d+\s*(?:일|개월|년)\s*(?:이상|초과|이하|미만)(?:\s*~?\s*\d+\s*(?:일|개월|년)\s*(?:이상|초과|이하|미만))?$")
 RATE_CELL = re.compile(r"^(?:연\s*)?\d+(?:\.\d+)?\s*%$")
 EARLY_FORMULA = re.compile(r"^기본이율\s*×\s*\d+(?:\.\d+)?\s*%\s*×\s*보유일수\s*/\s*계약일수$")
@@ -264,6 +297,21 @@ def add_display_highlights(result, documents):
                     "evidence": [source_evidence(document, block, *match.span(1))],
                 })
                 break
+    # Preserve an explicitly stated holding-period definition and its adjacent
+    # calculation clause together. Never infer which day is included.
+    for heading, period, calculation in zip(document["blocks"], document["blocks"][1:], document["blocks"][2:]):
+        if not re.search(r"중도해지(?:이율|금리|이자율)", heading["text"]):
+            continue
+        period_match = re.search(r"입금[^\n]*중도해지일\s*전일[^\n]*기간[^\n]*", period["text"])
+        calculation_match = re.search(r"[^\n]*중도해지(?:이율|금리|이자율)[^\n]*이자[^\n]*", calculation["text"])
+        if period_match and calculation_match:
+            category = next(item for item in result["categories"] if item["category"] == CATEGORIES[2])
+            category.setdefault("display_highlights", []).append({
+                "statement": "원문에 적힌 이자 계산 기간: " + period_match.group().strip() + " " + calculation_match.group().strip(),
+                "evidence": [source_evidence(document, period, *period_match.span()),
+                             source_evidence(document, calculation, *calculation_match.span())],
+            })
+            break
     # This applies only where the source itself contains both the legal
     # preconditions and the specific cost restriction in adjacent blocks.
     for first, second in zip(document["blocks"], document["blocks"][1:]):
@@ -355,9 +403,10 @@ def extract_supported_table_values(category, verified, tables):
         if table["header"] not in headers and table["header"] not in verified:
             headers.append(table["header"])
     return {"statement": "원문 표: " + description,
-            "important_conditions": ["기준일과 다른 적용 조건·예외는 원문에서 추가 확인해 주세요."],
+            "important_conditions": ["기준일과 다른 적용 조건·예외는 원문에서 추가 확인해 주세요.",
+                                     "AI 설명이 근거와 맞는지도 추가 확인해 주세요."],
             "conditions": [], "status": "found", "evidence": headers + verified,
-            "structured_values": values, "completeness": "needs_review"}
+            "structured_values": values, "completeness": "needs_review", "claim_status": "needs_review"}
 
 
 def validate_response(raw, product_name, documents):
@@ -394,21 +443,17 @@ def validate_response(raw, product_name, documents):
                 or date["status"] not in ("found", "not_found_in_input", "needs_review")):
             raise ModelError()
         valid_date, date_invalid, date_evidence = False, False, []
+        unknown_date = date["date"].strip().casefold() in {"", "미확인", "불명", "unknown", "n/a"}
         for ev in date["evidence"]:
-            if not exact_keys(ev, ("document_id", "block_id", "quote")) or any(not isinstance(ev[k], str) for k in ev):
+            if not evidence_descriptor(ev):
                 raise ModelError()
             match = index.get((ev["document_id"], ev["block_id"]))
-            if (match and ev["document_id"] == doc["id"] and ev["quote"].strip()
-                    and ev["quote"] in match[1]["text"] and date["date"].strip()
-                    and date["date"] in ev["quote"]):
+            if (match and ev["document_id"] == doc["id"] and not unknown_date
+                    and date["date"] in match[1]["text"]):
                 valid_date = True
-                source_doc, block = match
-                start = block["start"] + block["text"].index(ev["quote"])
-                end = start + len(ev["quote"])
-                original_start, original_end = source_doc["_boundaries"][start], source_doc["_boundaries"][end]
-                date_evidence.append({"document_id": doc["id"], "document_name": doc["name"], "block_id": block["id"],
-                                      "quote": doc["_source"][original_start:original_end],
-                                      "start": original_start, "end": original_end})
+                item = source_evidence(*match)
+                if item not in date_evidence:
+                    date_evidence.append(item)
             else:
                 date_invalid = True
         if date["status"] == "found" and (date_invalid or not valid_date or not date["evidence"]):
@@ -433,46 +478,56 @@ def validate_response(raw, product_name, documents):
             raise ModelError()
         facts, bad, has_grounded, has_structured = [], False, False, False
         for fact in category["facts"]:
-            if (not exact_keys(fact, ("statement", "important_conditions", "conditions", "status", "evidence"))
+            base_keys = {"statement", "important_conditions", "conditions", "status", "evidence"}
+            if (not isinstance(fact, dict) or set(fact) not in (base_keys, base_keys | {"condition_fields"})
                     or not isinstance(fact["statement"], str) or not fact["statement"].strip()
                     or not isinstance(fact["important_conditions"], list) or any(not isinstance(x, str) for x in fact["important_conditions"])
                     or not isinstance(fact["conditions"], list) or any(not isinstance(x, str) for x in fact["conditions"])
                     or fact["status"] not in ("found", "not_found_in_input", "needs_review")
-                    or not isinstance(fact["evidence"], list)):
+                    or not isinstance(fact["evidence"], list)
+                    or ("condition_fields" in fact and (not exact_keys(fact["condition_fields"], CONDITION_FIELDS)
+                        or any(not isinstance(v, str) for v in fact["condition_fields"].values())))):
                 raise ModelError()
             if fact["status"] == "not_found_in_input" and fact["evidence"]:
                 raise ModelError()
             verified, invalid = [], False
             for ev in fact["evidence"]:
-                if not exact_keys(ev, ("document_id", "block_id", "quote")) or any(not isinstance(ev[k], str) for k in ev):
+                if not evidence_descriptor(ev):
                     raise ModelError()
                 match = index.get((ev["document_id"], ev["block_id"]))
-                quote = ev["quote"]
-                if not match or not quote.strip() or quote not in match[1]["text"]:
+                if not match:
                     invalid = True
                     continue
-                doc, block = match
-                start = block["start"] + block["text"].index(quote)
-                end = start + len(quote)
-                original_start, original_end = doc["_boundaries"][start], doc["_boundaries"][end]
-                verified.append({"document_id": doc["id"], "document_name": doc["name"], "block_id": block["id"],
-                                 "quote": doc["_source"][original_start:original_end],
-                                 "start": original_start, "end": original_end})
+                item = source_evidence(*match)
+                if item not in verified:
+                    verified.append(item)
+            missing, unverified = check_priority_fields(fact, name, verified)
+            missing_notice = ("우대조건의 구조화된 필수 항목을 추가 확인해 주세요: " +
+                              ", ".join(CONDITION_LABELS[key] for key in missing) + ".") if missing else None
+            unverified_notice = ("우대조건의 원문 대조가 필요한 항목: " +
+                                 ", ".join(CONDITION_LABELS[key] for key in unverified) + ".") if unverified else None
             if invalid or (fact["status"] == "found" and not verified):
                 bad = partial = True
                 facts.append({"statement": "근거 검증에 실패해 이 사실을 표시하지 않습니다.",
-                              "important_conditions": [], "conditions": [], "status": "validation_failed", "evidence": []})
+                              "important_conditions": [notice for notice in (missing_notice, unverified_notice) if notice],
+                              "conditions": [], "status": "validation_failed", "evidence": []})
             else:
                 has_grounded = has_grounded or bool(verified)
                 structured = extract_supported_table_values(name, verified, tables) if fact["status"] == "found" else None
                 if structured:
                     facts.append(structured)
                     has_structured = True
-                else:
+                if not structured or missing or unverified:
+                    notices = ["관련 조건과 예외가 모두 포함됐는지 추가 확인해 주세요."] if verified else []
+                    if missing_notice:
+                        notices.append(missing_notice)
+                    if unverified_notice:
+                        notices.append(unverified_notice)
                     facts.append({"statement": "원문 발췌: " + verified[0]["quote"] if verified else
                                                "입력에서 관련 내용과 조건을 추가 확인해 주세요.",
-                                  "important_conditions": ["관련 조건과 예외가 모두 포함됐는지 추가 확인해 주세요."] if verified else [],
-                                  "conditions": [], "status": "needs_review", "evidence": verified})
+                                  "important_conditions": notices,
+                                  "conditions": [], "status": "needs_review", "evidence": verified,
+                                  "condition_fields_missing": missing, "condition_fields_unverified": unverified})
         if blocked:
             output.append({"category": name, "summary": "분석 결과를 표시하지 않습니다.", "facts": [], "unknowns": []})
         else:

@@ -74,6 +74,13 @@ class ProductTests(unittest.TestCase):
         self.assertIn("※ 각주 내용", data["documents"][1]["blocks"][1]["text"])
         self.assertEqual(payload["response_format"]["type"], "json_schema")
         self.assertEqual(payload["max_tokens"], product.OUTPUT_TOKENS)
+        schema = payload["response_format"]["json_schema"]["schema"]
+        fact_schema = schema["properties"]["categories"]["items"]["properties"]["facts"]["items"]
+        evidence = fact_schema["properties"]["evidence"]["items"]
+        self.assertEqual(set(evidence["properties"]), {"document_id", "block_id"})
+        self.assertEqual(set(fact_schema["properties"]["condition_fields"]["required"]),
+                         {"applicability", "period_definition", "exceptions"})
+        self.assertIn("인용문을 작성하지 않는다", system)
 
     def test_transport_one_attempt_and_no_retry_on_error(self):
         opener = MagicMock()
@@ -163,8 +170,8 @@ class ProductTests(unittest.TestCase):
         self.assertTrue(all("특정 수수료 없음" not in f["statement"] for f in result["categories"][1]["facts"]))
         self.assertEqual(result["categories"][1]["facts"][1]["evidence"], [])
 
-    def test_bad_block_or_quote_hides_fact_and_summary_only_for_affected_category(self):
-        for field, value in (("block_id", "P9999"), ("quote", "없는 문장"), ("document_id", "D999")):
+    def test_unknown_document_or_block_hides_only_the_affected_fact(self):
+        for field, value in (("block_id", "P9999"), ("document_id", "D999")):
             data = raw_result(self.docs)
             data["categories"][0]["facts"][0]["evidence"][0][field] = value
             result = product.validate_response(data, self.name, self.docs)
@@ -173,6 +180,66 @@ class ProductTests(unittest.TestCase):
             self.assertNotIn("2.0%", result["categories"][0]["summary"])
             self.assertEqual(result["categories"][1]["facts"][0]["status"], "needs_review")
             self.assertTrue(result["categories"][1]["facts"][0]["evidence"])
+
+    def test_legacy_model_quote_is_ignored_and_source_block_is_review_only(self):
+        data = raw_result(self.docs)
+        fact = data["categories"][0]["facts"][1]
+        fact["statement"] = "원문에 없는 우대조건을 만족하면 금리가 적용됩니다."
+        fact["evidence"][0]["quote"] = "모델이 만들어낸 문장"
+        result = product.validate_response(data, self.name, self.docs)
+        checked = result["categories"][0]["facts"][1]
+        actual = next(b["text"] for b in self.docs[0]["blocks"] if b["id"] == fact["evidence"][0]["block_id"])
+        self.assertEqual(checked["status"], "needs_review")
+        self.assertEqual(checked["evidence"][0]["quote"], actual)
+        self.assertNotIn("모델이 만들어낸 문장", json.dumps(result, ensure_ascii=False))
+        self.assertNotIn("원문에 없는 우대조건을 만족하면", json.dumps(result, ensure_ascii=False))
+        self.assertEqual(checked["condition_fields_missing"], list(product.CONDITION_FIELDS))
+
+    def test_each_selected_paragraph_is_separate_and_invalid_ids_are_rejected(self):
+        data = raw_result(self.docs)
+        fact = data["categories"][0]["facts"][1]
+        first = fact["evidence"][0]["block_id"]
+        second = next(b["id"] for b in self.docs[0]["blocks"] if "■ 중도해지" in b["text"])
+        fact["evidence"] = [{"document_id": "D001", "block_id": first},
+                            {"document_id": "D001", "block_id": second}]
+        result = product.validate_response(data, self.name, self.docs)
+        checked = result["categories"][0]["facts"][1]
+        self.assertEqual(checked["status"], "needs_review")
+        self.assertEqual([ev["block_id"] for ev in checked["evidence"]], [first, second])
+        for ev in checked["evidence"]:
+            self.assertEqual(self.docs[0]["_source"][ev["start"]:ev["end"]], ev["quote"])
+        fact["evidence"][1]["block_id"] = "P9999"
+        invalid = product.validate_response(data, self.name, self.docs)
+        self.assertEqual(invalid["categories"][0]["facts"][1]["status"], "validation_failed")
+        self.assertEqual(invalid["categories"][0]["facts"][1]["evidence"], [])
+        self.assertEqual(invalid["categories"][1]["facts"][0]["status"], "needs_review")
+
+    def test_priority_fields_cannot_turn_unrelated_paragraph_into_confirmation(self):
+        data = raw_result(self.docs)
+        fact = data["categories"][0]["facts"][1]
+        fact["condition_fields"] = {"applicability": "급여이체", "period_definition": "", "exceptions": "미확인"}
+        fact["evidence"] = [{"document_id": "D001", "block_id": self.docs[0]["blocks"][0]["id"]}]
+        result = product.validate_response(data, self.name, self.docs)
+        checked = result["categories"][0]["facts"][1]
+        self.assertEqual(checked["status"], "needs_review")
+        self.assertEqual(checked["condition_fields_missing"], ["period_definition", "exceptions"])
+        self.assertEqual(checked["condition_fields_unverified"], ["applicability"])
+        self.assertTrue(any("기간 정의" in note for note in checked["important_conditions"]))
+        fact["condition_fields"].update(period_definition="가입 전", exceptions="조건별 제한")
+        checked = product.validate_response(data, self.name, self.docs)["categories"][0]["facts"][1]
+        self.assertEqual(checked["status"], "needs_review")
+        self.assertEqual(checked["condition_fields_missing"], [])
+        self.assertEqual(checked["condition_fields_unverified"], list(product.CONDITION_FIELDS))
+
+    def test_literal_field_matches_do_not_automatically_confirm_semantics(self):
+        data = raw_result(self.docs)
+        fact = data["categories"][0]["facts"][1]
+        fact["condition_fields"] = {"applicability": "급여이체", "period_definition": "6개월",
+                                    "exceptions": "중도해지 시 적용하지 않습니다"}
+        checked = product.validate_response(data, self.name, self.docs)["categories"][0]["facts"][1]
+        self.assertEqual(checked["condition_fields_missing"], [])
+        self.assertEqual(checked["condition_fields_unverified"], [])
+        self.assertEqual(checked["status"], "needs_review")
 
     def test_newline_normalization_tracks_original_positions(self):
         text = "첫 제목\r\n첫 내용\r\n\r\n둘째 제목\r\n둘째 내용"
@@ -201,6 +268,16 @@ class ProductTests(unittest.TestCase):
         self.assertEqual(bad["documents"][0]["date_status"], "validation_failed")
         self.assertEqual(bad["documents"][0]["date_evidence"], [])
         self.assertNotIn("기간별 기본금리", bad["categories"][0]["summary"])
+
+    def test_date_uses_selected_source_block_and_does_not_trust_legacy_quote(self):
+        data = raw_result(self.docs)
+        data["document_dates"][0]["evidence"][0]["quote"] = "모델이 임의로 만든 날짜 문구"
+        result = product.validate_response(data, self.name, self.docs)
+        date = result["documents"][0]
+        self.assertEqual(date["date_status"], "needs_review")
+        self.assertEqual(date["date"], "미확인")
+        self.assertIn("2026년 1월 1일", date["date_evidence"][0]["quote"])
+        self.assertNotIn("모델이 임의로 만든 날짜 문구", json.dumps(result, ensure_ascii=False))
 
     def test_inconsistent_model_descriptions_are_not_displayed_as_facts(self):
         data = raw_result(self.docs)
@@ -331,7 +408,7 @@ class ProductTests(unittest.TestCase):
         self.assertNotIn("2개월 미만", fact["statement"])
         self.assertEqual([e["quote"] for e in fact["evidence"]], [header, row2])
 
-    def test_structured_table_never_repairs_an_invalid_quote(self):
+    def test_structured_table_is_source_derived_and_does_not_validate_model_claim(self):
         header = "구분 | 3개월 이상 9개월 미만"
         row = "기본금리 | 연 7.30%"
         name, docs = product.prepare_documents("테스트 정기예금", [make_doc(header + "\n\n" + row)])
@@ -339,12 +416,33 @@ class ProductTests(unittest.TestCase):
         raw["document_dates"] = [{"document_id": "D001", "date": "", "status": "not_found_in_input", "evidence": []}]
         for category in raw["categories"]:
             category["facts"] = []
-        raw["categories"][0]["facts"] = [{"statement": "설명", "important_conditions": [], "conditions": [], "status": "found",
+        raw["categories"][0]["facts"] = [{"statement": "관계없는 금리는 연 99%", "important_conditions": [], "conditions": [], "status": "found",
             "evidence": [{"document_id": "D001", "block_id": "P0002", "quote": row + " 변조"}]}]
         result = product.validate_response(raw, name, docs)
-        self.assertEqual(result["processing_status"], "partial")
-        self.assertEqual(result["categories"][0]["facts"][0]["status"], "validation_failed")
-        self.assertNotIn("structured_values", result["categories"][0]["facts"][0])
+        checked = result["categories"][0]["facts"][0]
+        self.assertEqual(result["processing_status"], "complete")
+        self.assertEqual(checked["status"], "found")
+        self.assertEqual(checked["claim_status"], "needs_review")
+        self.assertEqual(checked["structured_values"][0]["rate"], "연 7.30%")
+        self.assertNotIn("99%", json.dumps(checked, ensure_ascii=False))
+        self.assertNotIn("변조", json.dumps(checked, ensure_ascii=False))
+
+    def test_incomplete_priority_does_not_hide_independently_verified_base_table(self):
+        header = "구분 | 3개월 이상 9개월 미만"
+        row = "기본금리 | 연 7.30%"
+        name, docs = product.prepare_documents("테스트 정기예금", [make_doc(header + "\n\n" + row)])
+        raw = raw_result(self.docs)
+        raw["document_dates"] = [{"document_id": "D001", "date": "", "status": "not_found_in_input", "evidence": []}]
+        for category in raw["categories"]:
+            category["facts"] = []
+        raw["categories"][0]["facts"] = [{"statement": "기본금리와 우대금리 조건", "important_conditions": [], "conditions": [],
+            "condition_fields": {"applicability": "", "period_definition": "", "exceptions": ""},
+            "status": "found", "evidence": [{"document_id": "D001", "block_id": "P0002"}]}]
+        facts = product.validate_response(raw, name, docs)["categories"][0]["facts"]
+        self.assertEqual([fact["status"] for fact in facts], ["found", "needs_review"])
+        self.assertEqual(facts[0]["structured_values"][0]["rate"], "연 7.30%")
+        self.assertEqual(facts[0]["claim_status"], "needs_review")
+        self.assertEqual(facts[1]["condition_fields_missing"], list(product.CONDITION_FIELDS))
 
     def test_truncated_refusal_and_malformed_responses_are_errors(self):
         for choice in ({"finish_reason": "length", "message": {"content": "{}"}},

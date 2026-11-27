@@ -58,7 +58,7 @@ function appendDocument() {
 addDocument.addEventListener("click", appendDocument);
 
 const stateLabels = {
-  found: "원문 확인",
+  found: "원문 근거 확인",
   not_found_in_input: "입력에서 확인되지 않음",
   needs_review: "추가 확인 필요",
   validation_failed: "근거 검증 실패"
@@ -101,6 +101,31 @@ function addEvidence(parent, evidence, conditions = []) {
   parent.append(details);
 }
 
+function numberedReviewConditions(fact) {
+  const numbered = [];
+  for (const ev of fact.evidence) {
+    const lines = ev.quote.split("\n").map(line => line.trim()).filter(Boolean);
+    const start = lines.findIndex(line => /^[①②③④⑤]\s*\S/.test(line));
+    if (start < 0) continue;
+    const tail = lines.slice(start);
+    if (!tail.every(line => /^[①②③④⑤]\s*\S/.test(line))) return [];
+    numbered.push(...tail);
+  }
+  return numbered;
+}
+
+function priorityReviewContext(fact) {
+  const context = [];
+  for (const ev of fact.evidence) {
+    const lines = ev.quote.split("\n").map(line => line.trim()).filter(Boolean);
+    const numbered = lines.findIndex(line => /^[①②③④⑤]\s*\S/.test(line));
+    if (numbered < 0) continue;
+    const start = lines.findIndex((line, index) => index < numbered && /적용\s*조건\s*[:：]/.test(line) && /우대/.test(line));
+    if (start >= 0) context.push(lines.slice(start, numbered).join(" "));
+  }
+  return context;
+}
+
 function renderFact(fact, options = {}) {
   const section = el("section", "fact");
   const header = el("div", "fact-heading");
@@ -124,6 +149,18 @@ function renderFact(fact, options = {}) {
     fact.important_conditions.forEach(condition => conditionList.append(el("li", "", condition)));
     section.append(conditionList);
   }
+  // Only complete, numbered source lines are shown as review-only conditions.
+  // The original evidence and paragraph IDs remain in the collapsed details.
+  const reviewConditions = options.showReviewSource && fact.status === "needs_review" ? numberedReviewConditions(fact) : [];
+  if (reviewConditions.length) {
+    const source = el("div", "review-source");
+    source.append(el("p", "context-note", "원문에 적힌 조건이에요. 적용 관계와 빠진 조건은 추가 확인해 주세요."));
+    priorityReviewContext(fact).forEach(line => source.append(el("p", "context-note", line)));
+    const conditions = el("ul", "conditions");
+    reviewConditions.forEach(condition => conditions.append(el("li", "", condition)));
+    source.append(conditions);
+    section.append(source);
+  }
   if (isBasic || isEarly) {
     const rows = el("ul", "rate-rows");
     values.forEach(value => rows.append(el("li", "", isBasic ? basicRateText(value) : earlyRateText(value))));
@@ -141,13 +178,14 @@ function renderFact(fact, options = {}) {
 
 function renderHighlight(highlight) {
   const section = el("section", "highlight");
+  section.append(el("span", "state found", "원문 근거 확인"));
   section.append(el("p", "highlight-text", highlight.statement));
   if (highlight.conditions?.length) {
     const conditions = el("ul", "conditions");
     highlight.conditions.forEach(condition => conditions.append(el("li", "", condition)));
     section.append(conditions);
   }
-  section.append(el("p", "context-note", "관련 조건과 예외는 원문에서 확인해 주세요."));
+  section.append(el("p", "context-note", "원문 인용과 위치를 확인했어요. 다른 조건과 예외는 추가 확인해 주세요."));
   addEvidence(section, highlight.evidence);
   return section;
 }
@@ -175,7 +213,19 @@ function render(categories, options = {}) {
       const list = el("div", "fact-list");
       let earlyTable = null;
       let highlightsInserted = false;
+      let reviewDetails = null;
+      const groupedReviews = item.facts.filter(fact => fact.status === "needs_review" && fact.evidence.length &&
+        fact.important_conditions.every(condition => condition === "관련 조건과 예외가 모두 포함됐는지 추가 확인해 주세요.") &&
+        !(item.category === "금리와 우대조건" && numberedReviewConditions(fact).length));
+      const displayedBasic = new Set();
       for (const fact of item.facts) {
+        if (fact.status === "found" && fact.structured_values?.length && fact.structured_values.every(v => v.kind === "basic_rate")) {
+          // Only exact duplicates are hidden: differing values, conditions or
+          // evidence remain independent results.
+          const key = JSON.stringify(fact);
+          if (displayedBasic.has(key)) continue;
+          displayedBasic.add(key);
+        }
         if (earlyFacts.includes(fact)) {
           if (!earlyTable) {
             earlyTable = el("details", "evidence rate-details");
@@ -183,8 +233,20 @@ function render(categories, options = {}) {
             list.append(earlyTable);
           }
           earlyTable.append(renderFact(fact, {earlyDetail: true}));
+        } else if (groupedReviews.includes(fact)) {
+          if (!reviewDetails) {
+            const section = el("section", "fact");
+            const heading = el("div", "fact-heading");
+            heading.append(el("span", "state failed", "추가 확인 필요"),
+                           el("p", "fact-text", "일부 적용 조건과 예외는 원문을 다시 확인해 주세요."));
+            reviewDetails = el("details", "evidence");
+            reviewDetails.append(el("summary", "evidence-title", `추가 확인할 원문 보기 · ${groupedReviews.length}개`));
+            section.append(heading, reviewDetails);
+            list.append(section);
+          }
+          reviewDetails.append(renderFact(fact));
         } else {
-          list.append(renderFact(fact));
+          list.append(renderFact(fact, {showReviewSource: item.category === "금리와 우대조건"}));
           if (basicFacts && !highlightsInserted && fact.status === "found" && fact.structured_values?.some(v => v.kind === "basic_rate")) {
             highlights.forEach(highlight => list.append(renderHighlight(highlight)));
             highlightsInserted = true;

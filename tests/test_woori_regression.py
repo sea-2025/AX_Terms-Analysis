@@ -27,10 +27,12 @@ class SavedWooriResponseTests(unittest.TestCase):
         with patch.object(product.urllib.request, "build_opener", side_effect=AssertionError("API 호출 금지")):
             cls.after = product.add_display_highlights(product.validate_response(cls.raw, name, docs), docs)
 
-    def test_saved_invalid_quote_and_date_remain_unconfirmed(self):
+    def test_saved_quote_is_replaced_by_source_but_date_remains_unconfirmed(self):
         self.assertEqual(self.before["categories"][0]["facts"][2]["status"], "validation_failed")
-        self.assertEqual(self.after["categories"][0]["facts"][2]["status"], "validation_failed")
-        self.assertEqual(self.after["categories"][0]["facts"][2]["evidence"], [])
+        self.assertEqual(self.after["categories"][0]["facts"][2]["status"], "needs_review")
+        self.assertEqual(self.after["categories"][0]["facts"][2]["evidence"][0]["block_id"], "P0018")
+        self.assertEqual(self.after["categories"][0]["facts"][2]["condition_fields_missing"],
+                         list(product.CONDITION_FIELDS))
         self.assertEqual(self.after["documents"][0]["date_status"], "validation_failed")
         self.assertEqual(self.after["documents"][0]["date"], "미확인")
 
@@ -70,10 +72,109 @@ class SavedWooriResponseTests(unittest.TestCase):
 
     def test_all_display_highlights_have_exact_source_offsets(self):
         highlights = [h for c in self.after["categories"] for h in c.get("display_highlights", [])]
-        self.assertEqual(len(highlights), 3)
+        self.assertEqual(len(highlights), 4)
+        period = next(h for h in highlights if "이자 계산 기간" in h["statement"])
+        self.assertIn("중도해지일 전일까지", period["statement"])
+        self.assertEqual([e["block_id"] for e in period["evidence"]], ["P0023", "P0024"])
         for highlight in highlights:
             for evidence in highlight["evidence"]:
                 self.assertEqual(self.source[evidence["start"]:evidence["end"]], evidence["quote"])
+
+
+FINAL = Path(__file__).resolve().parent.parent / "artifacts" / "final_validation_20261127"
+FINAL_FILES = (FINAL / "result.json", FINAL / "validated_result.json", DATA / "input_verified.txt")
+
+ID_RESPONSE = Path(__file__).resolve().parent.parent / "artifacts" / "id_schema_validation_20261127_01" / "result.json"
+
+
+@unittest.skipUnless(ID_RESPONSE.is_file() and FILES[2].is_file(), "문단 ID 실제 응답 자료가 없습니다")
+class IdResponseDisplayTests(unittest.TestCase):
+    def setUp(self):
+        envelope = json.loads(ID_RESPONSE.read_text(encoding="utf-8"))
+        self.raw = json.loads(envelope["choices"][0]["message"]["content"])
+        source = FILES[2].read_text(encoding="utf-8")
+        name = "저장 응답 재생"
+        _, self.docs = product.prepare_documents(name, [{"name": "원문", "product_name": name,
+                                                        "scope": "full", "date": "", "text": source}])
+        with patch.object(product.urllib.request, "build_opener", side_effect=AssertionError("API 호출 금지")):
+            self.result = product.add_display_highlights(product.validate_response(self.raw, name, self.docs), self.docs)
+
+    def test_incorrect_model_claims_are_not_displayed_as_facts(self):
+        output = json.dumps(self.result, ensure_ascii=False)
+        self.assertNotIn("우대조건을 모두 충족해야 한다", output)
+        self.assertNotIn("입금일부터 해지일까지", output)
+        priority = self.result["categories"][0]["facts"][-1]
+        self.assertEqual(priority["status"], "needs_review")
+        self.assertTrue(priority["condition_fields_unverified"])
+        self.assertIn("중도해지일 전일까지", output)
+        self.assertIn("0.15%", output)
+
+    def test_unknown_date_is_invalid_even_if_word_occurs_in_source(self):
+        source = "날짜 미확인"
+        name = "테스트"
+        _, docs = product.prepare_documents(name, [{"name": "문서", "product_name": name,
+                                                    "scope": "full", "date": "", "text": source}])
+        raw = {"product": {"suitability": "suitable", "consistency": "consistent", "note": ""},
+               "document_dates": [{"document_id": "D001", "date": "미확인", "status": "found",
+                                   "evidence": [{"document_id": "D001", "block_id": "P0001"}]}],
+               "categories": [{"category": c, "summary": "", "facts": [], "unknowns": []} for c in product.CATEGORIES]}
+        result = product.validate_response(raw, name, docs)
+        self.assertEqual(result["documents"][0]["date_status"], "validation_failed")
+        self.assertEqual(result["documents"][0]["date"], "미확인")
+        self.assertEqual(result["processing_status"], "partial")
+
+    def test_period_highlight_is_not_created_from_end_date_including_termination(self):
+        source = "중도해지이율\n\n입금일부터 중도해지일까지의 기간에 대하여\n\n예치기간별 중도해지이율로 계산한 이자를 합계"
+        name = "테스트"
+        _, docs = product.prepare_documents(name, [{"name": "문서", "product_name": name,
+                                                    "scope": "full", "date": "", "text": source}])
+        result = {"processing_status": "partial", "categories": [{"category": c} for c in product.CATEGORIES]}
+        product.add_display_highlights(result, docs)
+        self.assertFalse(result["categories"][2].get("display_highlights"))
+
+
+@unittest.skipUnless(all(path.is_file() for path in FINAL_FILES), "최종 실제 응답 자료가 없습니다")
+class FinalResponseEvidenceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        envelope = json.loads(FINAL_FILES[0].read_text(encoding="utf-8"))
+        raw = json.loads(envelope["choices"][0]["message"]["content"])
+        cls.before = json.loads(FINAL_FILES[1].read_text(encoding="utf-8"))
+        cls.source = FINAL_FILES[2].read_text(encoding="utf-8")
+        name = cls.before["product"]["name"]
+        document = {"name": cls.before["documents"][0]["name"], "product_name": name,
+                    "scope": "full", "date": "", "text": cls.source}
+        _, docs = product.prepare_documents(name, [document])
+        with patch.object(product.urllib.request, "build_opener", side_effect=AssertionError("API 호출 금지")):
+            cls.after = product.add_display_highlights(product.validate_response(raw, name, docs), docs)
+
+    def test_four_legacy_quote_mismatches_link_to_real_paragraphs_not_confirmed_claims(self):
+        positions = [(0, 1, ["P0018"]), (1, 0, ["P0054"]),
+                     (2, 1, ["P0018"]), (2, 2, ["P0036", "P0037", "P0042"])]
+        self.assertEqual(sum(f["status"] == "validation_failed" for c in self.before["categories"] for f in c["facts"]), 4)
+        self.assertEqual(sum(f["status"] == "validation_failed" for c in self.after["categories"] for f in c["facts"]), 0)
+        for category, index, expected_ids in positions:
+            with self.subTest(category=category, index=index):
+                self.assertEqual(self.before["categories"][category]["facts"][index]["status"], "validation_failed")
+                fact = self.after["categories"][category]["facts"][index]
+                self.assertEqual(fact["status"], "needs_review")
+                self.assertEqual([e["block_id"] for e in fact["evidence"]], expected_ids)
+                for ev in fact["evidence"]:
+                    self.assertEqual(self.source[ev["start"]:ev["end"]], ev["quote"])
+        self.assertNotIn("P0019", [e["block_id"] for e in self.after["categories"][0]["facts"][1]["evidence"]])
+        self.assertEqual(self.after["categories"][0]["facts"][1]["condition_fields_missing"], list(product.CONDITION_FIELDS))
+        self.assertEqual(self.after["documents"][0]["date_status"], "validation_failed")
+        self.assertEqual(self.after["processing_status"], "partial")
+
+    def test_other_confirmed_table_values_are_not_hidden(self):
+        rate = self.after["categories"][0]["facts"][0]
+        early = self.after["categories"][2]["facts"][0]
+        self.assertEqual(rate["status"], "found")
+        self.assertEqual([v["rate"] for v in rate["structured_values"]], ["연 2.60%", "연 2.80%", "연 2.20%"])
+        self.assertEqual(early["status"], "found")
+        self.assertEqual(len(early["structured_values"]), 5)
+        self.assertNotIn("minimum", early["structured_values"][0])
+        self.assertTrue(all("0.15%" in v.get("minimum", "") for v in early["structured_values"][1:]))
 
 
 if __name__ == "__main__":
