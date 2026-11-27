@@ -1,2 +1,3 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+test_data/woori_first_deposit/input*.txt text eol=lf

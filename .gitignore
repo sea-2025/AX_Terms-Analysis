@@ -6,4 +6,6 @@ __pycache__/
 *.pem
 result*.json
 audit*.json
+api_audit*.json
+validated_*.json
 artifacts/
