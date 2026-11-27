@@ -54,6 +54,10 @@ python .\web.py
 
 배포 주소의 `/products`에서 상품 분석을 사용할 수 있습니다. 분석 요청에는 OpenAI API 비용이 발생하며, 공개 사이트에서는 다른 방문자의 분석도 설정한 계정에 청구됩니다. 브라우저의 중복 클릭 방지와 서버 인스턴스별 동시 실행 방지는 여러 서버 인스턴스 전체의 사용량 제한을 보장하지 않습니다.
 
+시연 주소: https://ax-terms-analysis-sea.vercel.app/products
+
+현재 운영 환경은 GitHub의 `deploy-vercel` 브랜치를 추적합니다. 해당 브랜치에 변경을 올리면 Vercel이 배포하며, `main` 브랜치는 별도로 유지합니다.
+
 `tests/run_hosted_browser_mock.py`는 배포용 서버의 브라우저 화면을 모의 응답으로 확인합니다. 기존 로컬 서버와 CLI 사용법은 동일합니다.
 
 ## 기존 개인정보 문서 분석
