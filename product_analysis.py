@@ -215,6 +215,151 @@ def exact_keys(value, keys):
     return isinstance(value, dict) and set(value) == set(keys)
 
 
+PERIOD_CELL = re.compile(r"^\d+\s*(?:일|개월|년)\s*(?:이상|초과|이하|미만)(?:\s*~?\s*\d+\s*(?:일|개월|년)\s*(?:이상|초과|이하|미만))?$")
+RATE_CELL = re.compile(r"^(?:연\s*)?\d+(?:\.\d+)?\s*%$")
+EARLY_FORMULA = re.compile(r"^기본이율\s*×\s*\d+(?:\.\d+)?\s*%\s*×\s*보유일수\s*/\s*계약일수$")
+MINIMUM_CELL = re.compile(r"^최저이율\s*연\s*\d+(?:\.\d+)?\s*%$")
+
+
+def source_evidence(doc, block, start=0, end=None):
+    """Return an exact source span, including offsets for the original line endings."""
+    if end is None:
+        end = len(block["text"])
+    start, end = block["start"] + start, block["start"] + end
+    original_start, original_end = doc["_boundaries"][start], doc["_boundaries"][end]
+    return {"document_id": doc["id"], "document_name": doc["name"], "block_id": block["id"],
+            "quote": doc["_source"][original_start:original_end], "start": original_start, "end": original_end}
+
+
+DISPLAY_SOURCE_PATTERNS = (
+    (CATEGORIES[0], re.compile(
+        r"(?m)^[ \t]*[•⋅·-]?[ \t]*(우대(?:이율|금리)(?:은|는)\s*(?:계약기간\s*)?만기\s*전\s*중도해지한\s*계좌에\s*대해서는\s*적용하지\s*않음)[ \t]*$"),
+     "만기 전에 해지한 계좌에는 우대금리가 적용되지 않아요."),
+    (CATEGORIES[2], re.compile(
+        r"(?m)^[ \t]*[•⋅·-]?[ \t]*(만기\s*전\s*해지할\s*경우\s*약정한\s*(?:이율|금리)보다\s*낮은\s*중도해지(?:이율|금리|이자율)이\s*적용됩니다\.)[ \t]*$"),
+     "만기 전에 해지하면 약속한 금리보다 낮은 금리가 적용돼요."),
+)
+
+ILLEGAL_FEE_CONTEXT = re.compile(
+    r"위법계약.*?은행이\s*금융소비자\s*보호에\s*관한\s*법률\*을\s*위반하여\s*계약을\s*체결한\s*(?:해지권\s*)?경우"
+    r".*?위반사항을\s*안\s*날로부터\s*(\d+)\s*년\s*이내\s*\(단,\s*계약체결일로부터\s*(\d+)\s*년\s*이내이고\s*계약이\s*종료하기\s*전일\s*것\)", re.S)
+ILLEGAL_FEE_RULE = re.compile(
+    r"요구받은\s*날로부터\s*(\d+)\s*일\s*이내.*?수락\s*여부를\s*통지하거나\s*거절\s*사유와\s*함께\s*거절을\s*통지"
+    r".*?정당한\s*사유\s*없이\s*금융소비자의\s*계약해지\s*요구를\s*따르지\s*않을\s*경우"
+    r".*?이에\s*따라\s*계약이\s*해지될\s*경우.*?수수료,\s*위약금\s*등\s*비용을\s*요구할\s*수\s*없습니다\.", re.S)
+
+
+def add_display_highlights(result, documents):
+    """Add source-backed display hints without changing model extraction or evidence checks."""
+    if result["processing_status"] == "blocked" or len(documents) != 1:
+        return result
+    document = documents[0]
+    for category_name, pattern, statement in DISPLAY_SOURCE_PATTERNS:
+        for block in document["blocks"]:
+            match = pattern.search(block["text"])
+            if match:
+                category = next(item for item in result["categories"] if item["category"] == category_name)
+                category.setdefault("display_highlights", []).append({
+                    "statement": statement,
+                    "evidence": [source_evidence(document, block, *match.span(1))],
+                })
+                break
+    # This applies only where the source itself contains both the legal
+    # preconditions and the specific cost restriction in adjacent blocks.
+    for first, second in zip(document["blocks"], document["blocks"][1:]):
+        context = ILLEGAL_FEE_CONTEXT.search(first["text"])
+        rule = ILLEGAL_FEE_RULE.search(second["text"])
+        if context and rule and "해지권" in first["text"]:
+            category = next(item for item in result["categories"] if item["category"] == CATEGORIES[1])
+            category.setdefault("display_highlights", []).append({
+                "statement": "위법계약 해지에는 정해진 조건에 따른 비용 제한이 있어요.",
+                "conditions": [
+                    "은행이 금융소비자 보호에 관한 법률을 위반해 계약을 체결한 경우에 해당해요.",
+                    f"위반을 안 날부터 {context[1]}년 이내, 계약일부터 {context[2]}년 이내이고 계약이 끝나기 전이어야 해요.",
+                    f"은행은 요구받은 날부터 {rule[1]}일 이내에 수락 여부를 알리거나 거절 사유와 함께 거절해야 해요.",
+                    "은행이 정당한 사유 없이 해지 요구를 따르지 않아 계약을 해지하면 수수료·위약금 등 비용을 요구할 수 없어요.",
+                ],
+                "evidence": [source_evidence(document, first), source_evidence(document, second)],
+            })
+            break
+    return result
+
+
+def structured_tables(documents):
+    """Recognize only explicit, contiguous table layouts; never join loose tokens."""
+    rows = []
+    for doc in documents:
+        blocks = doc["blocks"]
+        for i, header in enumerate(blocks):
+            headers = [s.strip() for s in header["text"].strip().split("|")]
+            if (len(headers) > 1 and headers[0] == "구분" and
+                    all(PERIOD_CELL.fullmatch(cell) for cell in headers[1:]) and i + 1 < len(blocks)):
+                row = blocks[i + 1]
+                cells = [s.strip() for s in row["text"].strip().split("|")]
+                if (len(cells) == len(headers) and cells[0] in ("기본금리", "기본이율") and
+                        all(RATE_CELL.fullmatch(cell) for cell in cells[1:])):
+                    context = next((b for b in reversed(blocks[max(0, i - 3):i])
+                                    if re.search(r"(?m)^[ \t]*기본(?:금리|이율)[ \t]*\|[^\n]*계약기간별[ \t]*이자율[ \t]*적용[ \t]*$", b["text"])), None)
+                    values = [{"kind": "basic_rate", "period": period, "rate": rate}
+                              for period, rate in zip(headers[1:], cells[1:])]
+                    if context:
+                        for value in values:
+                            value["period_basis"] = "contract_term"
+                    rows.append({"category": CATEGORIES[0], "document_id": doc["id"], "block_id": row["id"],
+                                 "match": row["text"].strip(), "values": values,
+                                 "header": source_evidence(doc, header),
+                                 "context": source_evidence(doc, context) if context else None})
+            if headers != ["보유기간", "이율", "비고"]:
+                continue
+            # Adjacent blocks/lines only: a new paragraph that is not a table
+            # row ends this table. Each period, formula and minimum share a row.
+            for block in blocks[i + 1:]:
+                parsed = []
+                for line in block["text"].splitlines():
+                    cells = [s.strip() for s in line.strip().split("|")]
+                    if (len(cells) not in (2, 3) or not PERIOD_CELL.fullmatch(cells[0]) or
+                            not (RATE_CELL.fullmatch(cells[1]) or EARLY_FORMULA.fullmatch(cells[1])) or
+                            (len(cells) == 3 and not MINIMUM_CELL.fullmatch(cells[2]))):
+                        parsed = []
+                        break
+                    value = {"kind": "early_rate", "period": cells[0], "rate": cells[1]}
+                    if len(cells) == 3:
+                        value["minimum"] = cells[2]
+                    parsed.append((line.strip(), value))
+                if not parsed:
+                    break
+                for line, value in parsed:
+                    rows.append({"category": CATEGORIES[2], "document_id": doc["id"], "block_id": block["id"],
+                                 "match": line, "values": [value], "header": source_evidence(doc, header)})
+    return rows
+
+
+def extract_supported_table_values(category, verified, tables):
+    """Use a table row only when the AI's validated quotation covers that row."""
+    matched = []
+    for table in tables:
+        if table["category"] != category:
+            continue
+        if any(ev["document_id"] == table["document_id"] and ev["block_id"] == table["block_id"]
+               and table["match"] in ev["quote"] for ev in verified):
+            matched.append(table)
+    if not matched:
+        return None
+    values = [value for table in matched for value in table["values"]]
+    description = "; ".join(f'{v["period"]}: {v["rate"]}' +
+                            (f' ({v["minimum"]})' if v.get("minimum") else "") for v in values)
+    headers = []
+    for table in matched:
+        if table.get("context") and table["context"] not in headers and table["context"] not in verified:
+            headers.append(table["context"])
+        if table["header"] not in headers and table["header"] not in verified:
+            headers.append(table["header"])
+    return {"statement": "원문 표: " + description,
+            "important_conditions": ["기준일과 다른 적용 조건·예외는 원문에서 추가 확인해 주세요."],
+            "conditions": [], "status": "found", "evidence": headers + verified,
+            "structured_values": values, "completeness": "needs_review"}
+
+
 def validate_response(raw, product_name, documents):
     if not exact_keys(raw, ("product", "document_dates", "categories")):
         raise ModelError()
@@ -270,18 +415,23 @@ def validate_response(raw, product_name, documents):
             bad_date = date_invalid = True
         elif date["status"] != "found" and (date["date"] or date["evidence"]):
             raise ModelError()
+        # Exact inclusion does not establish whether a date is a rate date,
+        # contract date or approval period. Do not label it as verified.
         metadata.append({"id": doc["id"], "name": doc["name"], "scope": doc["scope"],
-                         "date": date["date"] if date["status"] == "found" and not date_invalid else "미확인",
-                         "date_status": "validation_failed" if date_invalid else date["status"],
+                         "date": "미확인",
+                         "date_status": "validation_failed" if date_invalid else
+                                        "needs_review" if date["status"] == "found" else date["status"],
                          "date_evidence": [] if date_invalid else date_evidence})
-    output, partial = [], bad_date
+    tables = structured_tables(documents)
+    partial = bad_date
+    output = []
     for name in CATEGORIES:
         category = next(c for c in categories if c["category"] == name)
         if (not isinstance(category["summary"], str) or not isinstance(category["facts"], list)
                 or not isinstance(category["unknowns"], list)
                 or any(not isinstance(x, str) for x in category["unknowns"])):
             raise ModelError()
-        facts, bad, has_grounded = [], False, False
+        facts, bad, has_grounded, has_structured = [], False, False, False
         for fact in category["facts"]:
             if (not exact_keys(fact, ("statement", "important_conditions", "conditions", "status", "evidence"))
                     or not isinstance(fact["statement"], str) or not fact["statement"].strip()
@@ -312,25 +462,32 @@ def validate_response(raw, product_name, documents):
                 bad = partial = True
                 facts.append({"statement": "근거 검증에 실패해 이 사실을 표시하지 않습니다.",
                               "important_conditions": [], "conditions": [], "status": "validation_failed", "evidence": []})
-            elif fact["status"] == "not_found_in_input":
-                facts.append({"statement": "입력에서 관련 내용을 확인하지 못했습니다.",
-                              "important_conditions": [], "conditions": [], "status": "not_found_in_input", "evidence": []})
-            elif not verified:
-                facts.append({"statement": "원문 근거가 없어 추가 확인이 필요합니다.",
-                              "important_conditions": [], "conditions": [], "status": "needs_review", "evidence": []})
             else:
-                has_grounded = True
-                facts.append({"statement": fact["statement"], "important_conditions": fact["important_conditions"], "conditions": fact["conditions"],
-                              "status": fact["status"], "evidence": verified})
+                has_grounded = has_grounded or bool(verified)
+                structured = extract_supported_table_values(name, verified, tables) if fact["status"] == "found" else None
+                if structured:
+                    facts.append(structured)
+                    has_structured = True
+                else:
+                    facts.append({"statement": "원문 발췌: " + verified[0]["quote"] if verified else
+                                               "입력에서 관련 내용과 조건을 추가 확인해 주세요.",
+                                  "important_conditions": ["관련 조건과 예외가 모두 포함됐는지 추가 확인해 주세요."] if verified else [],
+                                  "conditions": [], "status": "needs_review", "evidence": verified})
         if blocked:
             output.append({"category": name, "summary": "분석 결과를 표시하지 않습니다.", "facts": [], "unknowns": []})
         else:
-            summary = ("일부 근거를 확인하지 못해 핵심 설명을 표시하지 않습니다." if bad or bad_date
-                       else category["summary"] if has_grounded else "입력에서 확인된 사실이 없습니다.")
-            output.append({"category": name, "summary": summary, "facts": facts, "unknowns": category["unknowns"]})
+            summary = ("원문 표에서 확인한 값입니다. 적용 조건과 예외는 추가 확인해 주세요." if has_structured
+                       else "일부 근거를 확인하지 못했습니다. 원문과 적용 조건을 추가 확인해 주세요." if bad
+                       else "인용의 의미와 적용 조건을 원문에서 추가 확인해 주세요." if has_grounded
+                       else "입력에서 관련 내용과 조건을 추가 확인해 주세요.")
+            # Free-form unknowns can contradict a fact, another category, or
+            # the input itself. Keep them only in the raw model response.
+            unknowns = (["입력에서 확인되지 않은 내용과 적용 조건을 원문에서 추가 확인해 주세요."]
+                        if category["unknowns"] or not facts else [])
+            output.append({"category": name, "summary": summary, "facts": facts, "unknowns": unknowns})
     return {
         "processing_status": "blocked" if blocked else "partial" if partial else "complete",
-        "product": {"name": product_name, **product},
+        "product": {"name": product_name, **product, "note": "문서 내용과 적용 조건은 추가 확인이 필요합니다."},
         "documents": metadata,
         "categories": output,
     }

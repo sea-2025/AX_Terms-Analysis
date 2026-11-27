@@ -104,6 +104,7 @@ class Handler(BaseHTTPRequestHandler):
                 payload = product_analysis.build_payload(product_name, documents, model)
                 raw = product_analysis.call_model(payload, key)
                 result = product_analysis.validate_response(raw, product_name, documents)
+                result = product_analysis.add_display_highlights(result, documents)
             self.send_json(200, result)
         except product_analysis.InputError as error:
             self.send_json(400, {"error": str(error)})
