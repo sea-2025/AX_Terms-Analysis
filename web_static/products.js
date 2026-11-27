@@ -64,43 +64,132 @@ const stateLabels = {
   validation_failed: "근거 검증 실패"
 };
 
-function render(categories) {
+function easyPeriod(period) {
+  return period.replace(/(\d+)\s*개월/g, (original, digits) => {
+    const months = Number(digits);
+    return Number.isSafeInteger(months) && months >= 12 && months % 12 === 0 ? `${months / 12}년` : original;
+  }).replace(/\s*~\s*/g, " ");
+}
+
+function basicRateText(value) {
+  const period = easyPeriod(value.period);
+  return value.period_basis === "contract_term"
+    ? `${period} 가입하면 기본금리는 ${value.rate}예요.`
+    : `기간 ${period}의 기본금리는 ${value.rate}예요.`;
+}
+
+function earlyRateText(value) {
+  const minimum = value.minimum ? ` · ${value.minimum}` : "";
+  return `${easyPeriod(value.period)}: ${value.rate}${minimum}`;
+}
+
+function addEvidence(parent, evidence, conditions = []) {
+  if (!conditions.length && !evidence.length) return;
+  const details = el("details", "evidence");
+  details.append(el("summary", "evidence-title", "상세 조건·원문 근거 보기 · " + evidence.length + "개"));
+  if (conditions.length) {
+    const detailList = el("ul", "conditions");
+    conditions.forEach(condition => detailList.append(el("li", "", condition)));
+    details.append(detailList);
+  }
+  for (const ev of evidence) {
+    const quote = el("div", "quote");
+    quote.append(el("span", "document-label", ev.document_name + " · " + ev.document_id + " · " + ev.block_id));
+    quote.append(el("p", "quote-text", ev.quote));
+    details.append(quote);
+  }
+  parent.append(details);
+}
+
+function renderFact(fact, options = {}) {
+  const section = el("section", "fact");
+  const header = el("div", "fact-heading");
+  const stateClass = fact.status === "found" ? "found" : fact.status === "not_found_in_input" ? "missing" : "failed";
+  header.append(el("span", "state " + stateClass, stateLabels[fact.status] || "추가 확인 필요"));
+  const values = fact.status === "found" && Array.isArray(fact.structured_values) ? fact.structured_values : [];
+  const isBasic = values.length && values.every(value => value.kind === "basic_rate");
+  const isEarly = values.length && values.every(value => value.kind === "early_rate");
+  if (isBasic) {
+    header.append(el("p", "fact-text", basicRateText(values[0])));
+  } else if (isEarly && options.earlyDetail) {
+    header.append(el("p", "fact-text", "아래는 원문에서 확인한 기간별 조건이에요."));
+  } else if (fact.status === "needs_review" && fact.statement.startsWith("원문 발췌: ")) {
+    header.append(el("p", "fact-text", "적용 조건과 예외는 원문에서 확인해 주세요."));
+  } else {
+    header.append(el("p", "fact-text", fact.statement));
+  }
+  section.append(header);
+  if (fact.important_conditions.length) {
+    const conditionList = el("ul", "conditions");
+    fact.important_conditions.forEach(condition => conditionList.append(el("li", "", condition)));
+    section.append(conditionList);
+  }
+  if (isBasic || isEarly) {
+    const rows = el("ul", "rate-rows");
+    values.forEach(value => rows.append(el("li", "", isBasic ? basicRateText(value) : earlyRateText(value))));
+    if (isBasic) {
+      const table = el("details", "evidence rate-details");
+      table.append(el("summary", "evidence-title", `기간별 기본금리 전체 보기 · ${values.length}개`), rows);
+      section.append(table);
+    } else {
+      section.append(rows);
+    }
+  }
+  addEvidence(section, fact.evidence, fact.conditions);
+  return section;
+}
+
+function renderHighlight(highlight) {
+  const section = el("section", "highlight");
+  section.append(el("p", "highlight-text", highlight.statement));
+  if (highlight.conditions?.length) {
+    const conditions = el("ul", "conditions");
+    highlight.conditions.forEach(condition => conditions.append(el("li", "", condition)));
+    section.append(conditions);
+  }
+  section.append(el("p", "context-note", "관련 조건과 예외는 원문에서 확인해 주세요."));
+  addEvidence(section, highlight.evidence);
+  return section;
+}
+
+function render(categories, options = {}) {
   resultCards.replaceChildren();
   for (const item of categories) {
     const card = el("article", "card");
     card.append(el("h3", "", item.category));
-    card.append(el("p", "summary", item.summary));
+    const basicFacts = item.category === "금리와 우대조건" && item.facts.some(f => f.status === "found" && f.structured_values?.some(v => v.kind === "basic_rate"));
+    const earlyFacts = item.category === "중도해지 조건" ? item.facts.filter(f => f.status === "found" && f.structured_values?.length && f.structured_values.every(v => v.kind === "early_rate")) : [];
+    const highlights = options.blocked ? [] : (item.display_highlights || []);
+    if (options.showMissing && !options.blocked && item.category === "수수료" && !item.facts.some(f => f.status === "found")) {
+      card.append(el("p", "summary", "입력한 상품설명서에서 일반 가입·해지 수수료에 대한 정보를 자동으로 확인하지 못했어요."));
+      card.append(el("p", "fee-note", "수수료가 없거나 무료라는 뜻은 아니에요. 특정 조건에 따른 비용은 원문을 따로 확인해 주세요."));
+    } else if (!basicFacts && !earlyFacts.length && !highlights.length) {
+      card.append(el("p", "summary", item.summary));
+    }
+    if (!basicFacts) highlights.forEach(highlight => card.append(renderHighlight(highlight)));
+    if (earlyFacts.length) {
+      card.append(el("p", "context-note", "맡긴 기간에 따른 금리와 계산식은 아래에서 확인해 주세요."));
+      card.append(el("p", "context-note", "기준일과 다른 적용 조건·예외도 원문에서 확인해 주세요."));
+    }
     if (item.facts.length) {
       const list = el("div", "fact-list");
+      let earlyTable = null;
+      let highlightsInserted = false;
       for (const fact of item.facts) {
-        const section = el("section", "fact");
-        const header = el("div", "fact-heading");
-        const stateClass = fact.status === "found" ? "found" : fact.status === "not_found_in_input" ? "missing" : "failed";
-        header.append(el("span", "state " + stateClass, stateLabels[fact.status] || "추가 확인 필요"));
-        header.append(el("p", "fact-text", fact.statement));
-        section.append(header);
-        if (fact.important_conditions.length) {
-          const conditionList = el("ul", "conditions");
-          fact.important_conditions.forEach(condition => conditionList.append(el("li", "", condition)));
-          section.append(conditionList);
-        }
-        if (fact.conditions.length || fact.evidence.length) {
-          const details = el("details", "evidence");
-          details.append(el("summary", "evidence-title", "상세 조건·원문 근거 보기 · " + fact.evidence.length + "개"));
-          if (fact.conditions.length) {
-            const detailList = el("ul", "conditions");
-            fact.conditions.forEach(condition => detailList.append(el("li", "", condition)));
-            details.append(detailList);
+        if (earlyFacts.includes(fact)) {
+          if (!earlyTable) {
+            earlyTable = el("details", "evidence rate-details");
+            earlyTable.append(el("summary", "evidence-title", "기간별 중도해지 금리와 계산식 보기"));
+            list.append(earlyTable);
           }
-          for (const ev of fact.evidence) {
-            const quote = el("div", "quote");
-            quote.append(el("span", "document-label", ev.document_name + " · " + ev.document_id + " · " + ev.block_id));
-            quote.append(el("p", "quote-text", ev.quote));
-            details.append(quote);
+          earlyTable.append(renderFact(fact, {earlyDetail: true}));
+        } else {
+          list.append(renderFact(fact));
+          if (basicFacts && !highlightsInserted && fact.status === "found" && fact.structured_values?.some(v => v.kind === "basic_rate")) {
+            highlights.forEach(highlight => list.append(renderHighlight(highlight)));
+            highlightsInserted = true;
           }
-          section.append(details);
         }
-        list.append(section);
       }
       card.append(list);
     }
@@ -188,12 +277,12 @@ form.addEventListener("submit", async event => {
     });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "분석을 완료하지 못했습니다.");
-    render(result.categories);
-    renderDocuments(result.documents);
     const state = result.processing_status;
+    render(result.categories, {showMissing: true, blocked: state === "blocked"});
+    renderDocuments(result.documents);
     badge.textContent = state === "complete" ? "처리 완료" : state === "partial" ? "부분 완료" : "분석 중단";
     const warnings = [];
-    if (state === "partial") warnings.push("일부 근거를 검증하지 못했습니다. 해당 사실과 핵심 설명은 숨겼습니다.");
+    if (state === "partial") warnings.push("원문과 적용 조건을 추가 확인해 주세요. 검증되지 않은 AI 설명은 표시하지 않습니다.");
     if (result.product.suitability === "not_suitable") warnings.push("예·적금 상품 약관, 상품설명서 또는 금리표가 필요합니다.");
     if (result.product.consistency === "conflicting") warnings.push("서로 다른 상품으로 보이는 문서가 포함되어 결과를 표시하지 않습니다.");
     if (result.product.suitability === "uncertain" || result.product.consistency === "uncertain") warnings.push(state === "blocked" ? "문서가 같은 상품인지 확인할 수 없어 결과를 표시하지 않습니다." : "문서의 적합성이나 동일 상품 여부를 추가로 확인해 주세요.");

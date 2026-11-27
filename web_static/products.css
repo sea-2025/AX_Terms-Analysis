@@ -17,6 +17,11 @@ input:focus { outline: 3px solid #a4ded3; outline-offset: 2px; border-color: #17
 .fact-heading { display: flex; align-items: start; flex-wrap: wrap; gap: 8px; }
 .fact-heading .state { flex: 0 0 auto; }
 .fact-text { margin: 0; font-size: 16px; line-height: 1.75; color: #263f3c; white-space: pre-wrap; }
+.highlight { border-left: 3px solid #86c9b7; padding-left: 13px; margin: 16px 0; }
+.highlight-text { margin: 0; color: #174b43; font-size: 17px; font-weight: 700; line-height: 1.65; }
+.context-note, .fee-note { margin: 8px 0 0; color: #526763; font-size: 14px; line-height: 1.7; overflow-wrap: anywhere; }
+.rate-rows { margin: 10px 0 0; padding-left: 22px; color: #263f3c; font-size: 15px; line-height: 1.85; overflow-wrap: anywhere; }
+.rate-details > .fact { margin: 0 12px 12px; }
 .conditions, .unknowns { margin: 9px 0 0; padding-left: 22px; color: #405754; font-size: 15px; line-height: 1.8; white-space: pre-wrap; }
 .unknown-title { color: #856039; font-size: 14px; font-weight: 700; margin: 16px 0 0; }
 .document-label { color: #147a6b; font-size: 13px; font-weight: 700; }

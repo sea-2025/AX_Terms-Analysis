@@ -170,6 +170,8 @@ async function main() {
     await waitFor(() => run("document.readyState === 'complete' && !!document.querySelector('#product-form')"));
     await send("Emulation.setDeviceMetricsOverride", {width: 1280, height: 900, deviceScaleFactor: 1, mobile: false});
     assert(await run("document.querySelectorAll('#product-cards .card').length === 3"), "Product cards not shown");
+    assert(await run("basicRateText({period:'12개월 이상 24개월 미만',rate:'연 2.80%',period_basis:'contract_term'}) === '1년 이상 2년 미만 가입하면 기본금리는 연 2.80%예요.' && basicRateText({period:'13개월 이상',rate:'연 1.50%'}).includes('기간 13개월 이상') && !basicRateText({period:'13개월 이상',rate:'연 1.50%'}).includes('가입하면')"),
+      "Duration conversion or unverified contract-term fallback failed");
     const fictional = fs.readFileSync(path.join(__dirname, "fixtures", "fictional-deposit.txt"), "utf8");
     await run(`window.__productFetchCount = 0;
       window.fetch = (url, opts) => {window.__productFetchCount++; window.__productRequest = JSON.parse(opts.body);
@@ -213,6 +215,41 @@ async function main() {
     assert(await run("document.querySelector('#product-cards details').open && document.querySelector('#product-cards .quote .document-label').textContent.includes('P0001')"), "Product evidence did not open");
     await run("document.querySelector('#product-input-toggle').click()");
     assert(await run("!document.querySelector('#product-input').hidden && document.querySelectorAll('.document-entry').length === 2"), "Product input did not reopen");
+    if (process.env.TERMS_REPLAY_FILE) {
+      const replay = JSON.parse(fs.readFileSync(process.env.TERMS_REPLAY_FILE, "utf8"));
+      const rate = replay.categories[0].facts.find(f => f.structured_values?.some(v => v.kind === "basic_rate"));
+      const floor = replay.categories[2].facts.find(f => f.structured_values?.some(v => v.minimum));
+      assert(rate && floor, "Replay has no structured rates");
+      await run(`window.fetch = async () => ({ok:true, json:async () => (${JSON.stringify(replay)})});
+        document.querySelector('#product-submit').click()`);
+      await waitFor(() => run("!document.querySelector('#product-submit').disabled"));
+      assert(await run("[...document.querySelectorAll('#product-cards .fact-text')].some(e => e.textContent.includes('6개월 이상 1년 미만 가입하면 기본금리는 연 2.60%예요.') && e.getClientRects().length)"),
+        "Easy basic rate missing from the main view");
+      assert(await run("[...document.querySelectorAll('#product-cards details')].some(d => d.querySelector('summary')?.textContent.includes('기간별 기본금리 전체 보기') && !d.open && d.textContent.includes('1년 이상 2년 미만 가입하면 기본금리는 연 2.80%예요.'))"),
+        "Complete basic-rate table missing or initially open");
+      await run("[...document.querySelectorAll('#product-cards details > summary')].find(s => s.textContent.includes('기간별 기본금리 전체 보기')).click()");
+      assert(await run("[...document.querySelectorAll('#product-cards details')].some(d => d.open && d.querySelector('summary')?.textContent.includes('기간별 기본금리 전체 보기') && [...d.querySelectorAll('li')].some(li => li.textContent.includes('1년 이상 2년 미만') && li.getClientRects().length))"),
+        "Basic-rate details did not open");
+      assert(await run("[...document.querySelectorAll('#product-cards .highlight-text')].some(e => e.textContent.includes('만기 전에 해지하면 약속한 금리보다 낮은 금리가 적용돼요.') && e.getClientRects().length)"),
+        "Source-backed early termination explanation missing");
+      assert(await run("[...document.querySelectorAll('#product-cards .highlight-text')].some(e => e.textContent.includes('우대금리가 적용되지 않아요.') && e.getClientRects().length)"),
+        "Priority-rate exclusion missing");
+      assert(await run("[...document.querySelectorAll('#product-cards details')].some(d => d.querySelector('summary')?.textContent.includes('기간별 중도해지 금리와 계산식 보기') && !d.open && d.textContent.includes('3개월 이상 6개월 미만: 기본이율×50%×보유일수/계약일수 · 최저이율 연 0.15%'))"),
+        "Early-rate minimum missing its period or detail is initially open");
+      await run("[...document.querySelectorAll('#product-cards details > summary')].find(s => s.textContent.includes('기간별 중도해지 금리와 계산식 보기')).click()");
+      assert(await run("[...document.querySelectorAll('#product-cards .rate-rows li')].some(li => li.textContent.includes('3개월 이상 6개월 미만') && li.textContent.includes('최저이율 연 0.15%') && li.getClientRects().length) && [...document.querySelectorAll('#product-cards .rate-rows li')].some(li => li.textContent.includes('3개월 미만: 연 0.1%') && !li.textContent.includes('0.15%'))"),
+        "Early-rate details do not preserve the minimum's period");
+      assert(await run("document.querySelectorAll('#product-cards .card')[1].textContent.includes('일반 가입·해지 수수료에 대한 정보를 자동으로 확인하지 못했어요.') && !document.querySelectorAll('#product-cards .card')[1].textContent.includes('0원')"),
+        "Missing fee was misrepresented");
+      assert(await run("document.querySelectorAll('#product-cards .card')[1].textContent.includes('위법계약 해지에는 정해진 조건에 따른 비용 제한이 있어요.') && document.querySelectorAll('#product-cards .card')[1].textContent.includes('정당한 사유 없이') && document.querySelectorAll('#product-cards .card')[1].textContent.includes('계약일부터 5년 이내')"),
+        "Conditional fee restriction and its conditions were not displayed");
+      assert(await run("document.querySelector('#product-cards').textContent.includes('추가 확인 필요') && document.querySelector('#product-cards').textContent.includes('근거 검증 실패')"),
+        "Review or evidence failure status missing");
+      assert(await run("!document.querySelector('#product-cards').textContent.includes('중도해지 시점의 영업점')"),
+        "Unverified conflicting condition was rendered");
+      console.log("Saved response rendered with simple rates, source-backed conditions, and collapsed details.");
+      await run("document.querySelector('#product-input-toggle').click()");
+    }
     await send("Emulation.setDeviceMetricsOverride", {width: 320, height: 720, deviceScaleFactor: 1, mobile: true});
     assert(await run("document.documentElement.scrollWidth <= document.documentElement.clientWidth"), "Product page overflows on mobile");
     await run(`window.fetch = async () => ({ok:false, json:async () => ({error:'테스트 오류'})}); document.querySelector('#product-submit').click()`);
